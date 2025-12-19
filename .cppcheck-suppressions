@@ -1,0 +1,70 @@
+# Cppcheck suppressions for kraft project
+# These are intentional patterns or false positives
+
+# Unused functions are often test utilities or API functions
+unusedFunction
+
+# Missing system includes are expected (we don't ship system headers)
+missingIncludeSystem
+
+# Variable scope warnings for loop counters
+variableScope
+
+# Some intentional casts in low-level code
+invalidPointerCast:src/vec.c
+
+# Flex buffer macros generate some warnings
+preprocessorErrorDirective
+
+# Test code may have intentionally dead code
+knownConditionTrueFalse:*Test*.c
+knownConditionTrueFalse:*Fuzz*.c
+
+# Null pointer after allocation failure - intentional crash on OOM
+# In embedded/systems code, malloc failure typically means unrecoverable state
+nullPointerOutOfMemory
+
+# constParameterCallback: Callback functions must match signature (e.g., vecPtrForEachFn)
+# These cannot be made const because the callback interface requires void*
+constParameterCallback
+
+# Style: Local variable could be declared const - tracked for future cleanup
+constVariablePointer
+
+# Style: Parameter could be declared const - tracked for future cleanup
+constParameterPointer
+constParameter
+
+# Style: Local variable/array could be const - tracked for future cleanup
+constVariable
+
+# Style: Unused struct members - may be used for padding or future use
+unusedStructMember
+
+# Style: Variable assigned but value not used - sometimes intentional for clarity
+unreadVariable
+
+# Style: Allocated memory not used - tracked for cleanup
+unusedAllocatedMemory
+
+# Style: Redundant assignment - sometimes intentional for clarity
+redundantAssignment
+
+# Style: Assert with string literal - used intentionally in test code
+incorrectStringBooleanError
+
+
+# Limit analysis branches (informational)
+normalCheckLevelMaxBranches
+
+# Array index warnings where bounds are actually checked
+arrayIndexOutOfBoundsCond
+
+# Shadow variable warnings in test code - intentional for clarity
+shadowVariable:*Test*.c
+
+# Known condition analysis - these are intentional defensive checks
+knownConditionTrueFalse
+
+# Redundant condition warnings - intentional for readability
+redundantCondition

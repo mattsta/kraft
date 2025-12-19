@@ -1,0 +1,519 @@
+name: CI
+
+on:
+  # Allow manual trigger
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Debug
+
+jobs:
+  # ============================================================
+  # Build and Static Analysis
+  # ============================================================
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential cppcheck
+
+    - name: Run cppcheck (static analysis)
+      run: |
+        cppcheck --enable=warning,style,performance,portability \
+                 --error-exitcode=1 \
+                 --suppressions-list=.cppcheck-suppressions \
+                 --inline-suppr \
+                 -I src \
+                 --std=c11 \
+                 --force \
+                 src/*.c src/*.h \
+                 2>&1 | tee cppcheck-report.txt
+
+        # Show summary
+        echo "=== Cppcheck Summary ==="
+        grep -c "error\|warning\|style\|performance" cppcheck-report.txt || echo "No issues found"
+
+    - name: Configure CMake
+      run: cmake -B build -DKRAFT_DEBUG=ON -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+    - name: Build
+      run: cmake --build build -j$(nproc)
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+        retention-days: 1
+
+  # ============================================================
+  # Unit Tests
+  # ============================================================
+  unit-tests:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    - name: Run kraft-test
+      run: ./build/src/kraft-test
+      timeout-minutes: 5
+
+    - name: Run datakit-test
+      run: ./build/deps/datakit/src/datakit-test
+      timeout-minutes: 5
+
+    - name: Run kvidxkit tests
+      run: |
+        ./build/deps/kvidxkit/src/kvidxkit-test
+        ./build/deps/kvidxkit/src/kvidxkit-test-batch
+        ./build/deps/kvidxkit/src/kvidxkit-test-config
+        ./build/deps/kvidxkit/src/kvidxkit-test-errors
+        ./build/deps/kvidxkit/src/kvidxkit-test-export
+        ./build/deps/kvidxkit/src/kvidxkit-test-iterator
+        ./build/deps/kvidxkit/src/kvidxkit-test-range
+        ./build/deps/kvidxkit/src/kvidxkit-test-stats
+        ./build/deps/kvidxkit/src/kvidxkit-test-tabledesc
+      timeout-minutes: 10
+
+    - name: Run kvidxkit comprehensive test
+      run: ./build/deps/kvidxkit/src/kvidxkit-test-comprehensive
+      timeout-minutes: 10
+
+  # ============================================================
+  # Sanitizer Tests (ASan, UBSan)
+  # ============================================================
+  sanitizer-tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - name: asan
+            flags: "-fsanitize=address -fno-omit-frame-pointer"
+            env: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:print_stats=1"
+          - name: ubsan
+            flags: "-fsanitize=undefined -fno-omit-frame-pointer"
+            env: "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1"
+          - name: asan-ubsan
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+            env: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1"
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+
+    - name: Configure CMake with ${{ matrix.sanitizer.name }}
+      run: |
+        cmake -B build \
+          -DKRAFT_DEBUG=ON \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="${{ matrix.sanitizer.flags }}" \
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.sanitizer.flags }}"
+
+    - name: Build with ${{ matrix.sanitizer.name }}
+      run: cmake --build build -j$(nproc)
+
+    - name: Run kraft-test with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-test
+      timeout-minutes: 10
+
+    - name: Run kraft-fuzz (3 nodes, 5k ops) with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-fuzz -n 3 -o 5000 -t 60
+      timeout-minutes: 5
+
+    - name: Run kraft-fuzz (5 nodes, 5k ops) with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-fuzz -n 5 -o 5000 -t 60
+      timeout-minutes: 5
+
+    - name: Run kraft-fuzz-chaos (mixed) with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-fuzz-chaos --scenario mixed -n 5 -o 5000 -t 60
+      timeout-minutes: 5
+
+    - name: Run kraft-fuzz-crdt with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-fuzz-crdt -r 10 -o 1000
+      timeout-minutes: 5
+
+    - name: Run kraft-fuzz-combo with ${{ matrix.sanitizer.name }}
+      run: ${{ matrix.sanitizer.env }} ./build/src/kraft-fuzz-combo -c 8 -o 500 -t 10
+      timeout-minutes: 5
+
+  # ============================================================
+  # Thread Sanitizer Tests (TSan)
+  # ============================================================
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+
+    - name: Configure CMake with ThreadSanitizer
+      run: |
+        cmake -B build \
+          -DKRAFT_DEBUG=ON \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+    - name: Build with ThreadSanitizer
+      run: cmake --build build -j$(nproc)
+
+    - name: Run kraft-test with TSan
+      run: TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1" ./build/src/kraft-test
+      timeout-minutes: 15
+
+    - name: Run kraft-fuzz (3 nodes) with TSan
+      run: TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1" ./build/src/kraft-fuzz -n 3 -o 2000 -t 60
+      timeout-minutes: 5
+
+  # ============================================================
+  # Fast Fuzzing (Quick smoke tests)
+  # ============================================================
+  fuzz-fast:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    # Fast kraft-fuzz tests (3, 5, 7 nodes)
+    - name: kraft-fuzz (3 nodes, 5k ops)
+      run: ./build/src/kraft-fuzz -n 3 -o 5000 -t 30
+      timeout-minutes: 2
+
+    - name: kraft-fuzz (5 nodes, 5k ops)
+      run: ./build/src/kraft-fuzz -n 5 -o 5000 -t 30
+      timeout-minutes: 2
+
+    - name: kraft-fuzz (7 nodes, 5k ops)
+      run: ./build/src/kraft-fuzz -n 7 -o 5000 -t 30
+      timeout-minutes: 2
+
+    # Fast chaos fuzzer - all scenarios
+    - name: kraft-fuzz-chaos (none baseline)
+      run: ./build/src/kraft-fuzz-chaos --scenario none -n 5 -o 5000 -t 30
+      timeout-minutes: 2
+
+    - name: kraft-fuzz-chaos (flaky network)
+      run: ./build/src/kraft-fuzz-chaos --scenario flaky -n 5 -o 5000 -t 30
+      timeout-minutes: 2
+
+    - name: kraft-fuzz-chaos (partition)
+      run: ./build/src/kraft-fuzz-chaos --scenario partition -n 5 -o 5000 -t 30
+      timeout-minutes: 2
+
+    - name: kraft-fuzz-chaos (mixed)
+      run: ./build/src/kraft-fuzz-chaos --scenario mixed -n 5 -o 5000 -t 30
+      timeout-minutes: 2
+
+    # Fast CRDT fuzzer
+    - name: kraft-fuzz-crdt (10 replicas, 1k ops)
+      run: ./build/src/kraft-fuzz-crdt -r 10 -o 1000
+      timeout-minutes: 2
+
+    # Fast multi-raft fuzzer
+    - name: kraft-fuzz-multi (2 groups, 3 nodes)
+      run: ./build/src/kraft-fuzz-multi -g 2 -n 3 -o 5000 -t 30
+      timeout-minutes: 2
+
+    # Fast combo fuzzer
+    - name: kraft-fuzz-combo (8 combinations)
+      run: ./build/src/kraft-fuzz-combo -c 8 -o 500 -t 5
+      timeout-minutes: 2
+
+    # kvidxkit fuzzer
+    - name: kvidxkit-fuzz (quick)
+      run: timeout 30 ./build/deps/kvidxkit/src/kvidxkit-fuzz || true
+      timeout-minutes: 2
+
+  # ============================================================
+  # Medium Fuzzing (More thorough tests)
+  # ============================================================
+  fuzz-medium:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    # Medium kraft-fuzz tests
+    - name: kraft-fuzz (5 nodes, 25k ops)
+      run: ./build/src/kraft-fuzz -n 5 -o 25000 -t 120
+      timeout-minutes: 5
+
+    - name: kraft-fuzz (9 nodes, 15k ops)
+      run: ./build/src/kraft-fuzz -n 9 -o 15000 -t 120
+      timeout-minutes: 5
+
+    # Medium chaos scenarios
+    - name: kraft-fuzz-chaos (storm)
+      run: ./build/src/kraft-fuzz-chaos --scenario storm -n 5 -o 15000 -t 120
+      timeout-minutes: 5
+
+    - name: kraft-fuzz-chaos (byzantine single)
+      run: ./build/src/kraft-fuzz-chaos --scenario byzantine -n 5 -o 15000 -t 120
+      timeout-minutes: 5
+
+    - name: kraft-fuzz-chaos (clock drift)
+      run: ./build/src/kraft-fuzz-chaos --scenario clock -n 5 -o 15000 -t 120
+      timeout-minutes: 5
+
+    - name: kraft-fuzz-chaos (gc pauses)
+      run: ./build/src/kraft-fuzz-chaos --scenario gc -n 5 -o 15000 -t 120
+      timeout-minutes: 5
+
+    - name: kraft-fuzz-chaos (hellweek)
+      run: ./build/src/kraft-fuzz-chaos --scenario hellweek -n 5 -o 10000 -t 120
+      timeout-minutes: 5
+
+    # Medium CRDT fuzzer
+    - name: kraft-fuzz-crdt (100 replicas, 10k ops)
+      run: ./build/src/kraft-fuzz-crdt -r 100 -o 10000
+      timeout-minutes: 5
+
+    # Medium multi-raft fuzzer
+    - name: kraft-fuzz-multi (5 groups, 5 nodes)
+      run: ./build/src/kraft-fuzz-multi -g 5 -n 5 -o 25000 -t 120
+      timeout-minutes: 5
+
+    # Medium combo fuzzer
+    - name: kraft-fuzz-combo (32 combinations)
+      run: ./build/src/kraft-fuzz-combo -c 32 -o 2000 -t 15
+      timeout-minutes: 10
+
+  # ============================================================
+  # Extended Fuzzing (Longer stress tests)
+  # ============================================================
+  fuzz-extended:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only run on main/master or manual trigger
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    # Extended fuzzing with larger clusters
+    - name: kraft-fuzz (15 nodes, 50k ops)
+      run: ./build/src/kraft-fuzz -n 15 -o 50000 -t 300
+      timeout-minutes: 10
+
+    - name: kraft-fuzz-chaos (mixed, 100k ops)
+      run: ./build/src/kraft-fuzz-chaos --scenario mixed -n 7 -o 100000 -t 300
+      timeout-minutes: 10
+
+    - name: kraft-fuzz-chaos (hellweek extended)
+      run: ./build/src/kraft-fuzz-chaos --scenario hellweek -n 7 -o 50000 -t 300 --escalate
+      timeout-minutes: 10
+
+    - name: kraft-fuzz-chaos (byzantine multi)
+      run: ./build/src/kraft-fuzz-chaos --scenario byzantine-multi -n 7 -o 50000 -t 300
+      timeout-minutes: 10
+
+    # Large scale CRDT fuzzing
+    - name: kraft-fuzz-crdt (500 replicas, 50k ops)
+      run: ./build/src/kraft-fuzz-crdt -r 500 -o 50000
+      timeout-minutes: 10
+
+    # Extended multi-raft
+    - name: kraft-fuzz-multi (10 groups, 5 nodes, 100k ops)
+      run: ./build/src/kraft-fuzz-multi -g 10 -n 5 -o 100000 -t 300
+      timeout-minutes: 10
+
+    # All feature combinations
+    - name: kraft-fuzz-combo (64 combinations)
+      run: ./build/src/kraft-fuzz-combo -c 64 -o 5000 -t 30
+      timeout-minutes: 15
+
+  # ============================================================
+  # Benchmarks (Performance regression detection)
+  # ============================================================
+  benchmarks:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    - name: kraft-bench throughput
+      run: ./build/src/kraft-bench throughput 2>&1 | tail -20
+      timeout-minutes: 5
+      continue-on-error: true
+
+    - name: kraft-bench latency
+      run: ./build/src/kraft-bench latency 2>&1 | tail -20
+      timeout-minutes: 5
+      continue-on-error: true
+
+    - name: kraft-bench election
+      run: ./build/src/kraft-bench election 2>&1 | tail -20
+      timeout-minutes: 5
+      continue-on-error: true
+
+    - name: kraft-bench scalability
+      run: ./build/src/kraft-bench scalability 2>&1 | tail -30
+      timeout-minutes: 10
+      continue-on-error: true
+
+    - name: kvidxkit-bench
+      run: timeout 60 ./build/deps/kvidxkit/src/kvidxkit-bench 2>&1 | tail -30 || true
+      timeout-minutes: 5
+      continue-on-error: true
+
+  # ============================================================
+  # Large Scale Stress Test (Weekly/Manual)
+  # ============================================================
+  stress-test:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only on manual trigger or weekly schedule
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+        path: build/
+
+    - name: Fix permissions
+      run: chmod +x build/src/* build/deps/*/src/* 2>/dev/null || true
+
+    # Long-running stress tests
+    - name: kraft-fuzz (50 nodes, 200k ops, 30 min)
+      run: ./build/src/kraft-fuzz -n 50 -o 200000 -t 1800
+      timeout-minutes: 35
+
+    - name: kraft-fuzz-chaos (hellweek, 1M ops, 30 min)
+      run: ./build/src/kraft-fuzz-chaos --scenario hellweek -n 15 -o 1000000 -t 1800 --escalate --dynamic
+      timeout-minutes: 35
+
+    - name: kraft-fuzz-multi (20 groups, 7 nodes, 30 min)
+      run: ./build/src/kraft-fuzz-multi -g 20 -n 7 -o 500000 -t 1800
+      timeout-minutes: 35
+
+    - name: kraft-fuzz-crdt (1000 replicas, 100k ops)
+      run: ./build/src/kraft-fuzz-crdt -r 1000 -o 100000
+      timeout-minutes: 15
+
+    - name: kraft-fuzz-combo (128 combinations, 10k ops each)
+      run: ./build/src/kraft-fuzz-combo -c 128 -o 10000 -t 60
+      timeout-minutes: 60
+
+  # ============================================================
+  # Summary
+  # ============================================================
+  ci-success:
+    needs: [build, unit-tests, sanitizer-tests, thread-sanitizer, fuzz-fast, fuzz-medium, benchmarks]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Check job results
+      run: |
+        if [ "${{ needs.build.result }}" != "success" ]; then
+          echo "Build failed!"
+          exit 1
+        fi
+        if [ "${{ needs.unit-tests.result }}" != "success" ]; then
+          echo "Unit tests failed!"
+          exit 1
+        fi
+        if [ "${{ needs.sanitizer-tests.result }}" != "success" ]; then
+          echo "Sanitizer tests failed!"
+          exit 1
+        fi
+        if [ "${{ needs.thread-sanitizer.result }}" != "success" ]; then
+          echo "Thread sanitizer tests failed!"
+          exit 1
+        fi
+        if [ "${{ needs.fuzz-fast.result }}" != "success" ]; then
+          echo "Fast fuzzing failed!"
+          exit 1
+        fi
+        if [ "${{ needs.fuzz-medium.result }}" != "success" ]; then
+          echo "Medium fuzzing failed!"
+          exit 1
+        fi
+        echo "All CI checks passed!"

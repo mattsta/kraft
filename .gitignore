@@ -1,0 +1,4 @@
+build*/
+kraft-*test*/
+test-output.log
+test-latest/
